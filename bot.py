@@ -1,12 +1,14 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.ui import Button, View
 import yt_dlp
 import asyncio
 from dotenv import load_dotenv
 import os
+import re
 
-# Load .env
+# Load token
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -23,12 +25,24 @@ ytdl_opts = {
 ffmpeg_opts = {"options": "-vn"}
 ytdl = yt_dlp.YoutubeDL(ytdl_opts)
 
+# Music Cog
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.queues = {}   # guild_id -> list of (url, title, thumbnail)
         self.loops = {}    # guild_id -> bool
         self.volumes = {}  # guild_id -> 0.0-1.0
+
+    async def get_audio(self, query):
+        # Direct YouTube, SoundCloud or Spotify URLs
+        if re.match(r'https?://(www\.)?(youtube\.com|youtu\.be|soundcloud\.com|open\.spotify\.com)', query):
+            data = await asyncio.to_thread(lambda: ytdl.extract_info(query, download=False))
+            if 'entries' in data:
+                data = data['entries'][0]
+        else:  # search on YouTube
+            data = await asyncio.to_thread(lambda: ytdl.extract_info(f"ytsearch:{query}", download=False))
+            data = data['entries'][0]
+        return data['url'], data['title'], data.get('thumbnail')
 
     async def play_next(self, guild_id):
         vc = self.bot.get_guild(guild_id).voice_client
@@ -57,27 +71,45 @@ class Music(commands.Cog):
 
             vc.play(source, after=after_playing)
 
-    async def get_audio(self, query):
-        data = await asyncio.to_thread(lambda: ytdl.extract_info(query, download=False))
-        if "entries" in data:
-            data = data["entries"][0]
-        return data["url"], data["title"], data.get("thumbnail")
+    async def send_queue_embed(self, interaction):
+        guild_id = interaction.guild.id
+        queue = self.queues.get(guild_id, [])
+        if queue:
+            desc = "\n".join([f"{i+1}. {item[1]}" for i, item in enumerate(queue[:10])])
+            embed = discord.Embed(title="🎶 Queue", description=desc, color=discord.Color.purple())
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send("Queue is empty.")
 
-    @app_commands.command(name="play", description="Play music or search YouTube")
+    @app_commands.command(name="join", description="Bot joins your voice channel")
+    async def join(self, interaction: discord.Interaction):
+        if not interaction.user.voice:
+            return await interaction.response.send_message("Join a voice channel first!", ephemeral=True)
+        channel = interaction.user.voice.channel
+        vc = interaction.guild.voice_client
+        if not vc:
+            await channel.connect()
+            await interaction.response.send_message(f"👋 Joined {channel.name}")
+        else:
+            await interaction.response.send_message("Already in a voice channel")
+
+    @app_commands.command(name="play", description="Play music from YouTube/Spotify/SoundCloud")
     async def play(self, interaction: discord.Interaction, query: str):
         if not interaction.user.voice:
             return await interaction.response.send_message("Join a voice channel first!", ephemeral=True)
         await interaction.response.defer()
-        channel = interaction.user.voice.channel
         vc = interaction.guild.voice_client
         if not vc:
-            vc = await channel.connect()
+            vc = await interaction.user.voice.channel.connect()
+
         url, title, thumb = await self.get_audio(query)
         guild_id = interaction.guild.id
         self.queues.setdefault(guild_id, [])
         self.queues[guild_id].append((url, title, thumb))
+
         if not vc.is_playing():
             await self.play_next(guild_id)
+
         embed = discord.Embed(title="🎶 Added to Queue", description=f"**{title}**", color=discord.Color.green())
         if thumb:
             embed.set_thumbnail(url=thumb)
@@ -118,9 +150,8 @@ class Music(commands.Cog):
     @app_commands.command(name="loop", description="Toggle loop mode")
     async def loop(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id
-        current = self.loops.get(guild_id, False)
-        self.loops[guild_id] = not current
-        await interaction.response.send_message(f"🔁 Loop {'ON' if not current else 'OFF'}")
+        self.loops[guild_id] = not self.loops.get(guild_id, False)
+        await interaction.response.send_message(f"🔁 Loop {'ON' if self.loops[guild_id] else 'OFF'}")
 
     @app_commands.command(name="nowplaying", description="Show current song")
     async def nowplaying(self, interaction: discord.Interaction):
@@ -135,6 +166,10 @@ class Music(commands.Cog):
             await interaction.response.send_message(embed=embed)
         else:
             await interaction.response.send_message("Nothing playing")
+
+    @app_commands.command(name="queue", description="Show song queue")
+    async def queue(self, interaction: discord.Interaction):
+        await self.send_queue_embed(interaction)
 
 @bot.event
 async def on_ready():

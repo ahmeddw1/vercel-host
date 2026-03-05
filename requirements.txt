@@ -1,5 +1,5 @@
-discord.py[voice]==2.4.0
+discord.py
 yt-dlp
-python-dotenv
+PyNaCl
 aiohttp
-chat-exporter
+python-dotenv
